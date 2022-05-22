@@ -1,0 +1,21 @@
+$TTL 14400
+example.com. 86400 IN SOA ns1.example.com. youremail.gmail.com. (
+2013060702 ; Serial Number
+86400 ; refresh
+7200 ; retry
+3600000 ; expire
+600 ; minimum in seconds )
+
+example.com. 86400 IN NS ns1.example.com.
+example.com. 86400 IN NS ns2.example.com.
+example.com. 14400 IN A 187.8.48.65
+
+localhost 14400 IN A 127.0.0.1
+
+example.com. 141400 IN MX 0 example.com.
+
+mail 14400 IN CNAME example.com.
+www 14400 IN CNAME example.com.
+ftp 14400 IN A 187.8.48.65
+
+example.com. IN TXT "v=spf1 ip4:187.8.48.64 +a +mx +ip4:187.8.48.65 ?all"

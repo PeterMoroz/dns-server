@@ -1,23 +1,17 @@
 package dnsresolver
 
 import (
+	"bufio"
 	"fmt"
 	"os"
-	"io/ioutil"
-	"encoding/json"
 	"path/filepath"
 	"encoding/binary"
 	"strings"
-	"strconv"
-)
-
-var (
-	zones map[string]interface{}
-	queryTypeName map[uint16]string
 )
 
 const headerLength = 12;
 const packageLength = 512;
+
 
 const rcodeNoError = 0x0;		// DNS Query completed successfully
 const rcodeFormError = 0x1;		// DNS Query format error
@@ -31,8 +25,48 @@ const rcodeNotAuth = 0x8;		// Server not authoritative for the zone
 const rcodeNotZone = 0x9;		// Name not in zone
 
 
+type dnsRecord struct {
+	name string
+	ttl uint32
+	dnsClass uint16
+	rrType uint16
+	rdlength uint16
+	rdata string
+}
+
+type soaRecord struct {
+	dnsRecord
+	serialNumber uint32
+	timeToRefresh uint32
+	timeToRetry uint32
+	timeToExpire uint32
+	minimumTTL uint32
+}
+
+var (
+	dnsClasses = map[string] uint16 { "IN": 0x0001 }
+	
+	// The most common DNS records are described in detail in the RFC 1034 and RFC 1035
+	rrTypes = map[string] uint16 { 
+		"A": 1,			// address IPv4
+		"NS": 2,		// nameserver
+		"CNAME": 5,		// canonical name
+		"SOA": 6,		// start of authority
+		"PTR": 12,		// pointer
+		"MX": 15,		// mail exchange
+		"TXT": 16,		// text
+		"AAAA": 28,		// address IPv6
+		"SRV": 33,		// service
+		"CAA": 257,		// certificate authority authorization
+	}
+	
+	directives map[string] string
+	records [] dnsRecord
+	soaRec soaRecord
+)
+
+
 func init() {
-	zones = make(map[string](interface{}))
 	zonesPath := "./zones"
 	dir, err := os.Open(zonesPath)
 	if err != nil {
@@ -43,8 +77,7 @@ func init() {
 			return
 		}
 		zonesPath = "../zones"
-	}
-	
+	}	
 	defer dir.Close()
 	
 	files, err := dir.Readdir(-1)
@@ -52,31 +85,104 @@ func init() {
 		fmt.Println("Could not read 'zones' directory content!")
 		return
 	}
-	
+
 	for _, f := range files {
 		fmt.Println("file: ", f.Name())
-		bs, err := ioutil.ReadFile(filepath.Join(zonesPath, f.Name()))
+		file, err := os.Open(filepath.Join(zonesPath, f.Name()))
 		if err != nil {
-			fmt.Println("ReadFile failed. ", err)
+			fmt.Println("Couldn't open file. ", err)
 			continue
 		}
 		
-		var zone map[string]interface{}		// zone := make(map[string](interface{}))
-		err = json.Unmarshal(bs, &zone)
-		if err != nil {
-			fmt.Printf("Unmarshal JSON failed (file %s). %s\n", f.Name(), err.Error())
-			continue
-		}
+		defer file.Close()
+		
+
+		// TO DO: process multiple files
+		directives = make(map[string] string)			
+		records = make([] dnsRecord, 0)	
+		
+		fileScanner := bufio.NewScanner(file)
+		fileScanner.Split(bufio.ScanLines)
+
+		var soaBuffer string	
+		soaInProgress := false
+		
+		for fileScanner.Scan() {
+			line := fileScanner.Text()
+			if len(line) == 0 {
+				continue
+			}
 			
-		origin := zone["$origin"].(string)
-		zones[origin] = zone
+			if strings.HasPrefix(line, "$") {
+				fmt.Println("directive: ", line)
+				var key, val string
+				_, err := fmt.Sscanf(line, "$%s %s", &key, &val)
+				if err != nil {
+					fmt.Println("Error when processing directive ", line)
+					continue
+				}
+				
+				directives[key] = val
+			} else {
+				idx1 := strings.Index(line, "(")
+				idx2 := strings.Index(line, ")")
+				
+				if (idx1 > 0 && idx2 > 0) {
+					// TO DO: proces SOA as a single string
+				} else if idx1 > 0 {
+					soaBuffer = line
+					soaInProgress = true
+				} else if idx2 > 0 {
+					soaBuffer += line
+					soaInProgress = false
+					fmt.Println("SOA ", soaBuffer)
+					// TO DO: proces SOA as a single string
+				} else {
+					if soaInProgress {
+						idx := strings.Index(line, ";")
+						if idx > 0 {
+							line = line[0:idx]	// skip comment
+						}
+						soaBuffer += line
+					} else {
+						fmt.Println("record: ", line)
+						var name  string	// if contains free-standing @ this denotes current ORIGIN (see directives), if this field has 'www' or 'ftp', etc., this can denote a subdomain of the current ORIGIN
+						var ttl uint32 = 0
+						var dnsClass string
+						var rrType string
+						var rdlength uint16 = 0
+						var rdata string
+						n, err := fmt.Sscanf(line, "%s %d %s %s %d %s", &name, &ttl, &dnsClass, &rrType, &rdlength, &rdata)
+						if err != nil {
+							// fmt.Println("Sscanf failed. n = ",  n, " error: ", err)
+							if n == 5 {
+								n, err = fmt.Sscanf(line, "%s %d %s %s %s", &name, &ttl, &dnsClass, &rrType, &rdata)
+								if err != nil {
+									fmt.Println("Sscanf failed. expected 5 fields, actual:",  n, " error: ", err)
+									continue
+								}
+							} else if n == 4 {
+								n, err = fmt.Sscanf(line, "%s %s %s %s", &name, &dnsClass, &rrType, &rdata)
+								if err != nil {
+									fmt.Println("Sscanf failed. expected 4 fields, actual ",  n, " error: ", err)
+									continue
+								}				
+							}
+						}
+						
+						if rrType == "A" {
+							rdlength = 4
+						} else if rrType == "AAAA" {
+							rdlength = 16
+						}
+						
+						record := dnsRecord{name, ttl, dnsClasses[dnsClass], rrTypes[rrType], rdlength, rdata}
+						records = append(records, record)
+					}
+				}
+			}	
+		}
 	}
-	
-	queryTypeName = make(map[uint16]string)
-	queryTypeName[0x0001] = "a"
-	queryTypeName[0x0002] = "ns"
-	queryTypeName[0x0005] = "cname"
-	queryTypeName[0x000f] = "mx"
 }
 
 type resolver struct {
@@ -92,90 +198,52 @@ func New(requestData [] byte) resolver {
 }
 
 func (r resolver) Response() [] byte {
-	records, qtype, domainNameSegments := r.getRecords()
+
+	// parse DNS Question
+	labels := make([]string, 0)	
+	var i byte = 12
+	n := r.requestData[i]
+	for n != 0 {
+		i += 1
+		labels = append(labels, string(r.requestData[i:i+n]))
+		i += n
+		n = r.requestData[i]
+	}
+	
+	i += 1	
+	qtype := binary.BigEndian.Uint16(r.requestData[i:i+2])
+
+	answers := r.getAnswers(labels, qtype)
 	
 	response := make([]byte, headerLength, packageLength)	// the initial length is equal to length of the header and the capacity is max length of DNS package
-	header := r.makeHeader(uint16(len(records)))
+	header := r.makeHeader(uint16(len(answers)))
 	copy(response, header[:])	
 	
-	response = append(response, r.makeQuestionSection(domainNameSegments, qtype)...)
-	response = append(response, r.makeAnswersSection(records, qtype)...)
+	response = append(response, r.makeQuestionSection(labels, qtype)...)
+	response = append(response, r.makeAnswersSection(answers, qtype)...)
 	return response
 }
 
-type dnsRecord struct {
+type dnsAnswer struct {
 	ttl uint32
 	rdlength uint16
 	rdata [] byte
 }
 
-func (r resolver) getRecords() ([] dnsRecord, uint16, [] string) {
-	domainNameSegments := make([]string, 0)
-	
-	data := r.requestData[12:]
-	var i byte = 0
-	n := data[i]
-	for n != 0 {
-		i += 1
-		domainNameSegments = append(domainNameSegments, string(data[i:i+n]))
-		i += n
-		n = data[i]
-	}
+func (r resolver) getAnswers(labels []string, qtype uint16) [] dnsAnswer {
+	name := strings.Join(labels, ".")
+	name = name + "."	// ineficient
+
+	answers := make([] dnsAnswer, 0)
 		
-	i += 1	
-	qtype := binary.BigEndian.Uint16(data[i:i+2])
-	domainRecords := make([] dnsRecord, 0)
-	
-	qname, qnameOk := queryTypeName[qtype]
-	if qnameOk == true {
-		domainName := strings.Join(domainNameSegments, ".")
-		zone, zoneOk := zones[domainName]
-		if zoneOk == true {
-			records, recordsOk := zone.(map[string] interface{})[qname]
-			if recordsOk == true {
-				fmt.Println("records: ", records)
-				fmt.Printf("records type %T\n", records)
-				for _, r := range records.([]interface{}) {					
-					fmt.Printf("record type %T, record value %#v \n", r, r)
-					for k, v := range r.(map[string] interface{}) {
-						fmt.Printf("key: %s, value type: %T\n", k, v)
-					}
-					
-					ttl := r.(map[string]interface{})["ttl"].(float64)
-					data := r.(map[string]interface{})["value"].(string)
-					
-					record := dnsRecord{ttl: uint32(ttl), rdlength: 0 }
-					
-					switch qtype {
-						case 0x0001:
-							record.rdlength = 4
-							record.rdata = make([]byte, 0, 4)
-							
-							octets := strings.Split(data, ".")
-							if len(octets) == 4 {
-								record.rdata = append(record.rdata, []byte{0x00, 0x00, 0x00, 0x00}...)
-								for i, s := range octets {
-									x, _ := strconv.ParseInt(s, 10, 16)	// use 16-bit length, because signed int is returned
-									record.rdata[i] = byte(x)
-								}
-							}
-														
-						default:
-							record.rdlength = 0
-							record.rdata = make([]byte, 0)
-					}
-					
-					domainRecords = append(domainRecords, record)
-				}
-			} else {
-				fmt.Println("No entries for type ", qname)
-			}
-		} else {
-			fmt.Println("No information about ", domainName)
+	for _, record := range records {
+		if (record.name == name && record.rrType == qtype) {
+			answer := dnsAnswer{record.ttl, record.rdlength, []byte(record.rdata)}
+			answers = append(answers, answer)
 		}
 	}
-	
-	return domainRecords, qtype, domainNameSegments
+		
+	return answers
 }
 
 func (r resolver) makeHeader(ancount uint16) [12] byte {
@@ -217,13 +285,13 @@ func (r resolver) makeHeader(ancount uint16) [12] byte {
 	return header
 }
 
-func (r resolver) makeQuestionSection(domainNameSegments [] string, qtype uint16) [] byte {
+func (r resolver) makeQuestionSection(labels [] string, qtype uint16) [] byte {
 	section := make([]byte, 0, 64)	// just arbitrary capacity
 	if r.formatError {
 		return section
 	}
 	
-	for _, s := range domainNameSegments {
+	for _, s := range labels {
 		section = append(section, byte(len(s)))
 		section = append(section, []byte(s)...)
 	}
@@ -236,7 +304,7 @@ func (r resolver) makeQuestionSection(domainNameSegments [] string, qtype uint16
 	return section
 }
 
-func (r resolver) makeAnswersSection(records [] dnsRecord, qtype uint16) [] byte {
+func (r resolver) makeAnswersSection(answers [] dnsAnswer, qtype uint16) [] byte {
 	section := make([]byte, 0, 64)	// just arbitrary capacity
 	if r.formatError || len(records) == 0 {
 		return section
@@ -249,14 +317,14 @@ func (r resolver) makeAnswersSection(records [] dnsRecord, qtype uint16) [] byte
 	binary.BigEndian.PutUint16(section[offset:], 0x0001)
 	offset += 2
 	
-	for _, record := range records {
+	for _, answer := range answers {
 		section = append(section, []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00}...)	
-		binary.BigEndian.PutUint32(section[offset:], record.ttl)
+		binary.BigEndian.PutUint32(section[offset:], answer.ttl)
 		offset += 4
-		binary.BigEndian.PutUint16(section[offset:], record.rdlength)
+		binary.BigEndian.PutUint16(section[offset:], answer.rdlength)
 		offset += 2
-		section = append(section, record.rdata...)
-		offset += int(record.rdlength)
+		section = append(section, answer.rdata...)
+		offset += int(answer.rdlength)
 	}
 	
 	return section
