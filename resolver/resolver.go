@@ -233,13 +233,35 @@ type dnsAnswer struct {
 func (r resolver) getAnswers(labels []string, qtype uint16) [] dnsAnswer {
 	name := strings.Join(labels, ".")
 	name = name + "."	// ineficient
+	
+	encodeRdata := func(rdata string, qtype uint16) []byte {
+		if qtype == 1 {	// support only Address IPv4 for now
+			result := make([]byte, 4)
+			n, err := fmt.Sscanf(rdata, "%d.%d.%d.%d", &result[0], &result[1], &result[2], &result[3])
+			if n != 4 || err != nil {
+				fmt.Println("Sscanf failed. expected 4 fields, actual ",  n, " error: ", err)
+				return nil
+			}
+			return result
+		}
+		return nil
+	}
+	
+	// fmt.Printf("r.getAnswers() - requested domain name '%s', query type %d\n", name, qtype)
 
 	answers := make([] dnsAnswer, 0)
 		
 	for _, record := range records {
 		if (record.name == name && record.rrType == qtype) {
-			answer := dnsAnswer{record.ttl, record.rdlength, []byte(record.rdata)}
-			answers = append(answers, answer)
+			fmt.Printf("found record: %v\n", record)
+			rdata := encodeRdata(record.rdata, qtype)
+			if rdata != nil {
+				answer := dnsAnswer{record.ttl, uint16(len(rdata)), rdata}
+				answers = append(answers, answer)
+			} else {
+				fmt.Println("Could not encode rdata (record %v, qtype %d)\n", record, qtype)
+				continue
+			}
 		}
 	}
 		
@@ -328,9 +350,4 @@ func (r resolver) makeAnswersSection(answers [] dnsAnswer, qtype uint16) [] byte
 	}
 	
 	return section
-}
-
-func Resolve(hostname string) string {
-	fmt.Printf("Resolving the hostname: %s\n", hostname)
-	return "10.0.0.1"
 }
